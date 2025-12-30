@@ -1,5 +1,5 @@
 -- // ========================================================== //
--- //      TDS LIBRARY - DEEPSEEK CORE v7 (X-Ray Ground Fix)     //
+-- //      TDS LIBRARY - ADAPTIVE CORE v8 (Ground Targeted)      //
 -- // ========================================================== //
 
 local TDS = {}
@@ -19,11 +19,12 @@ MapEngine.RecAnchor = Vector3.new(-48.8, 3.8, 14.5) -- Simplicity Spawn
 MapEngine.CurrentAnchor = Vector3.zero
 MapEngine.Offset = Vector3.zero
 
+-- Get Position Helper
 function MapEngine:GetPos(obj)
     if not obj then return nil end
     if obj:IsA("BasePart") then return obj.Position end
     if obj:IsA("Model") or obj:IsA("Folder") then
-        local p = obj:FindFirstChild("0") or obj:FindFirstChild("1") or obj:FindFirstChild("Start") or obj:FindFirstChildWhichIsA("BasePart")
+        local p = obj:FindFirstChild("0") or obj:FindFirstChild("1") or obj:FindFirstChildWhichIsA("BasePart")
         if p and p:IsA("BasePart") then return p.Position end
         for _, c in ipairs(obj:GetChildren()) do
             if c:IsA("BasePart") then return c.Position end
@@ -32,17 +33,19 @@ function MapEngine:GetPos(obj)
     return nil
 end
 
+-- Find Map Anchor (Reference Point)
 function MapEngine:FindAnchor()
     local map = TDS.Services.Workspace:FindFirstChild("Map")
     if not map then return Vector3.zero end
 
-    -- 1. Path Start
+    -- 1. EnemySpawn (Best)
+    if map:FindFirstChild("EnemySpawn") then return map.EnemySpawn.Position end
+
+    -- 2. Paths Folder (Lowest Node)
     if map:FindFirstChild("Paths") then
         local p = map.Paths
         local startNode = p:FindFirstChild("0") or p:FindFirstChild("1") or p:FindFirstChild("Start")
-        if not startNode and p:FindFirstChild("Path") then startNode = p.Path:FindFirstChild("0") end
         
-        -- Numeric search
         if not startNode then
             local lowest = 9999
             for _, c in ipairs(p:GetChildren()) do
@@ -53,41 +56,42 @@ function MapEngine:FindAnchor()
         local pos = self:GetPos(startNode)
         if pos then return pos end
     end
-
-    -- 2. EnemySpawn
-    if map:FindFirstChild("EnemySpawn") then return map.EnemySpawn.Position end
     
     return Vector3.zero
 end
 
--- // RAYCAST: WHITELIST MODE (X-RAY VISION)
-function MapEngine:FindValidGround(x, z)
-    local origin = Vector3.new(x, self.CurrentAnchor.Y + 500, z) -- Start VERY high
-    local dir = Vector3.new(0, -1000, 0) -- Shoot way down
+-- Raycast: "Sniper" Mode (Targets Ground Only)
+function MapEngine:FindGroundY(x, z)
+    local origin = Vector3.new(x, self.CurrentAnchor.Y + 300, z)
+    local dir = Vector3.new(0, -600, 0)
     
     local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Include -- IGNORE EVERYTHING ELSE
+    params.FilterType = Enum.RaycastFilterType.Include -- ONLY HIT THESE
     
-    -- BUILD WHITELIST (ONLY GROUND)
     local whitelist = {}
+    
+    -- Add Workspace.Ground (Your specific request)
+    if TDS.Services.Workspace:FindFirstChild("Ground") then 
+        table.insert(whitelist, TDS.Services.Workspace.Ground) 
+    end
+    
+    -- Add Map.Ground / Environment
     local map = TDS.Services.Workspace:FindFirstChild("Map")
+    if map then
+        if map:FindFirstChild("Ground") then table.insert(whitelist, map.Ground) end
+        if map:FindFirstChild("Environment") then table.insert(whitelist, map.Environment) end
+    end
     
-    if TDS.Services.Workspace:FindFirstChild("Ground") then table.insert(whitelist, TDS.Services.Workspace.Ground) end
-    if map and map:FindFirstChild("Ground") then table.insert(whitelist, map.Ground) end
-    if map and map:FindFirstChild("Environment") then table.insert(whitelist, map.Environment) end
-    
-    -- CRITICAL FALLBACK: If no ground folders found, include the whole map but exclude bad stuff
-    if #whitelist == 0 and map then
+    -- Fallback: If no specific folders, exclude bad stuff
+    if #whitelist == 0 then
         params.FilterType = Enum.RaycastFilterType.Exclude
         params.FilterDescendantsInstances = {
             TDS.LocalPlayer.Character,
             TDS.Services.Workspace.Towers,
-            TDS.Services.Workspace.Pickups,
             TDS.Services.Workspace.Camera,
-            map:FindFirstChild("Road"),
-            map:FindFirstChild("Paths"),
-            map:FindFirstChild("Cliff"),
-            map:FindFirstChild("Boundaries")
+            map and map:FindFirstChild("Road"),
+            map and map:FindFirstChild("Cliff"),
+            map and map:FindFirstChild("Boundaries")
         }
     else
         params.FilterDescendantsInstances = whitelist
@@ -96,7 +100,7 @@ function MapEngine:FindValidGround(x, z)
     local res = TDS.Services.Workspace:Raycast(origin, dir, params)
     
     if res and res.Instance then
-        return res.Position.Y + 0.1 -- Found it!
+        return res.Position.Y + 0.1 -- Lift slightly above floor
     end
     
     return nil
@@ -123,24 +127,19 @@ function TDS:Place(name, recX, recY, recZ)
     local baseZ = recZ + MapEngine.Offset.Z
     
     -- Spiral Search: 0 to 45 studs
-    local RADIUS_LIMIT = 45
-    local STEP_SIZE = 4
+    local radius_limit = 45
+    local step_size = 3
     
-    for r = 0, RADIUS_LIMIT, STEP_SIZE do
-        local points = (r == 0) and 1 or math.floor((2 * math.pi * r) / STEP_SIZE)
+    for r = 0, radius_limit, step_size do
+        local points = (r == 0) and 1 or math.floor((2 * math.pi * r) / step_size)
         for i = 1, points do
             local angle = (math.pi * 2 / points) * i
             local tryX = baseX + (math.cos(angle) * r)
             local tryZ = baseZ + (math.sin(angle) * r)
             
-            -- SCAN
-            local groundY = MapEngine:FindValidGround(tryX, tryZ)
+            -- RAYCAST
+            local groundY = MapEngine:FindGroundY(tryX, tryZ)
             
-            -- If raycast fails, force attempt at estimated height (Better than nothing)
-            if not groundY and r == 0 then
-               groundY = MapEngine.CurrentAnchor.Y + (recY - MapEngine.RecAnchor.Y)
-            end
-
             if groundY then
                 local target = Vector3.new(tryX, groundY, tryZ)
                 local s, res = pcall(function()
@@ -153,6 +152,7 @@ function TDS:Place(name, recX, recY, recZ)
                 if s and (res == true or (type(res)=="table" and res.Success)) then
                     local tOut = tick() + 2
                     repeat task.wait() until tick() > tOut or #TDS.Services.Workspace.Towers:GetChildren() > #self.placed_towers
+                    
                     for _, t in ipairs(TDS.Services.Workspace.Towers:GetChildren()) do
                         if t.Name == name and t.Owner.Value == TDS.LocalPlayer.UserId then
                             local known = false
@@ -168,14 +168,7 @@ function TDS:Place(name, recX, recY, recZ)
             end
         end
     end
-    print("❌ FAILED:", name, "- Attempting Force Place...")
-    -- DESPERATION MOVE: FORCE PLACE AT EXACT OFFSET
-    pcall(function()
-        self.Remote:InvokeServer("Troops", "Place", {
-            Rotation = CFrame.new(),
-            Position = Vector3.new(baseX, MapEngine.CurrentAnchor.Y, baseZ)
-        }, name)
-    end)
+    print("❌ FAILED:", name)
 end
 
 function TDS:Upgrade(idx)
@@ -187,6 +180,7 @@ function TDS:Skip()
     pcall(function() self.Remote:InvokeServer("Voting", "Skip") end)
 end
 
+-- // AUTO SKIP LOOP
 task.spawn(function()
     while task.wait(1) do
         if getgenv().AutoSkip then
