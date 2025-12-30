@@ -1,5 +1,5 @@
 -- // ========================================================== //
--- //      TDS LIBRARY - DEEPSEEK CORE v5 (Ground Fix)           //
+-- //      TDS LIBRARY - DEEPSEEK CORE v6 (Direct Ground Fix)    //
 -- // ========================================================== //
 
 local TDS = {}
@@ -15,16 +15,15 @@ TDS.Remote = TDS.Services.ReplicatedStorage:WaitForChild("RemoteFunction")
 
 -- // 1. MAP ENGINE
 local MapEngine = {}
-MapEngine.RecAnchor = Vector3.new(-48.8, 3.8, 14.5) -- Simplicity Spawn
+MapEngine.RecAnchor = Vector3.new(-48.8, 3.8, 14.5)
 MapEngine.CurrentAnchor = Vector3.zero
 MapEngine.Offset = Vector3.zero
 
--- Get absolute position of any object/model/folder
 function MapEngine:GetPos(obj)
     if not obj then return nil end
     if obj:IsA("BasePart") then return obj.Position end
     if obj:IsA("Model") or obj:IsA("Folder") then
-        local p = obj:FindFirstChild("0") or obj:FindFirstChild("1") or obj:FindFirstChild("Start") or obj:FindFirstChildWhichIsA("BasePart")
+        local p = obj:FindFirstChild("0") or obj:FindFirstChild("1") or obj:FindFirstChildWhichIsA("BasePart")
         if p and p:IsA("BasePart") then return p.Position end
         for _, c in ipairs(obj:GetChildren()) do
             if c:IsA("BasePart") then return c.Position end
@@ -69,53 +68,66 @@ function MapEngine:FindAnchor()
     return Vector3.zero
 end
 
--- // RAYCAST: TARGET SPECIFIC GROUND FOLDERS
+-- // PHYSICAL PART CHECK (Backup if Raycast fails)
+function MapEngine:GetGroundPartHeight(x, z)
+    local map = TDS.Services.Workspace:FindFirstChild("Map")
+    if not map then return nil end
+    
+    local groundFolder = map:FindFirstChild("Ground") or TDS.Services.Workspace:FindFirstChild("Ground")
+    if not groundFolder then return nil end
+    
+    -- Loop through all parts in Ground folder
+    for _, part in ipairs(groundFolder:GetDescendants()) do
+        if part:IsA("BasePart") then
+            -- Check if X,Z is inside the part
+            local halfSize = part.Size / 2
+            local pos = part.Position
+            
+            if x >= (pos.X - halfSize.X) and x <= (pos.X + halfSize.X) and
+               z >= (pos.Z - halfSize.Z) and z <= (pos.Z + halfSize.Z) then
+               
+               -- Return Top Surface Y
+               return pos.Y + halfSize.Y + 0.2
+            end
+        end
+    end
+    return nil
+end
+
+-- // RAYCAST: EXCLUDE MODE (Hits everything EXCEPT Roads)
 function MapEngine:FindValidGround(x, z)
     local map = TDS.Services.Workspace:FindFirstChild("Map")
-    local origin = Vector3.new(x, self.CurrentAnchor.Y + 200, z)
-    local dir = Vector3.new(0, -500, 0)
+    local origin = Vector3.new(x, self.CurrentAnchor.Y + 300, z) -- Start High
+    local dir = Vector3.new(0, -600, 0) -- Shoot Down
     
     local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Include -- STRICT MODE
+    params.FilterType = Enum.RaycastFilterType.Exclude -- HIT EVERYTHING EXCEPT...
     
-    local whitelist = {}
+    local blacklist = {
+        TDS.LocalPlayer.Character,
+        TDS.Services.Workspace:FindFirstChild("Towers"),
+        TDS.Services.Workspace:FindFirstChild("Pickups"),
+        TDS.Services.Workspace:FindFirstChild("Camera")
+    }
     
-    -- 1. Add Workspace.Ground (The one you showed in Dex)
-    if TDS.Services.Workspace:FindFirstChild("Ground") then
-        table.insert(whitelist, TDS.Services.Workspace.Ground)
-    end
-    
-    -- 2. Add Map.Ground / Map.Environment
     if map then
-        if map:FindFirstChild("Ground") then table.insert(whitelist, map.Ground) end
-        if map:FindFirstChild("Environment") then table.insert(whitelist, map.Environment) end
+        if map:FindFirstChild("Road") then table.insert(blacklist, map.Road) end
+        if map:FindFirstChild("Paths") then table.insert(blacklist, map.Paths) end
+        if map:FindFirstChild("Cliff") then table.insert(blacklist, map.Cliff) end
+        if map:FindFirstChild("Boundaries") then table.insert(blacklist, map.Boundaries) end
     end
     
-    -- If we found specific ground folders, use them.
-    if #whitelist > 0 then
-        params.FilterDescendantsInstances = whitelist
-    else
-        -- Fallback: Use Exclude mode if no "Ground" folder exists
-        params.FilterType = Enum.RaycastFilterType.Exclude
-        params.FilterDescendantsInstances = {
-            TDS.LocalPlayer.Character,
-            TDS.Services.Workspace.Towers,
-            TDS.Services.Workspace.Pickups,
-            TDS.Services.Workspace.Camera,
-            map and map:FindFirstChild("Road"),
-            map and map:FindFirstChild("Cliff"),
-            map and map:FindFirstChild("Boundaries"),
-            map and map:FindFirstChild("Paths")
-        }
-    end
+    params.FilterDescendantsInstances = blacklist
 
     local res = TDS.Services.Workspace:Raycast(origin, dir, params)
     
     if res and res.Instance then
-        -- Lift 0.5 studs to avoid clipping
-        return res.Position.Y + 0.5 
+        -- FOUND SOLID OBJECT
+        return res.Position.Y + 0.5
     end
-    return nil
+    
+    -- RAYCAST MISSED? TRY PHYSICAL CHECK
+    return self:GetGroundPartHeight(x, z)
 end
 
 function MapEngine:Initialize()
@@ -143,7 +155,7 @@ function TDS:Place(name, recX, recY, recZ)
     
     -- Spiral Search: 0 to 45 studs
     local RADIUS_LIMIT = 45
-    local STEP_SIZE = 4
+    local STEP_SIZE = 3
     
     for r = 0, RADIUS_LIMIT, STEP_SIZE do
         local points = (r == 0) and 1 or math.floor((2 * math.pi * r) / STEP_SIZE)
@@ -153,7 +165,7 @@ function TDS:Place(name, recX, recY, recZ)
             local tryX = baseX + (math.cos(angle) * r)
             local tryZ = baseZ + (math.sin(angle) * r)
             
-            -- RAYCAST
+            -- SCAN
             local groundY = MapEngine:FindValidGround(tryX, tryZ)
             
             if groundY then
@@ -188,24 +200,7 @@ function TDS:Place(name, recX, recY, recZ)
         end
     end
     
-    -- FALLBACK: BLIND PLACEMENT (If Raycast failed)
-    print("⚠️ Raycast failed. Attempting blind placement at estimated height...")
-    local estimatedY = MapEngine.CurrentAnchor.Y + (recY - MapEngine.RecAnchor.Y) + 1
-    local blindTarget = Vector3.new(baseX, estimatedY, baseZ)
-    
-    local s, res = pcall(function()
-        return self.Remote:InvokeServer("Troops", "Place", {
-            Rotation = CFrame.new(),
-            Position = blindTarget
-        }, name)
-    end)
-    
-    if s and (res == true or (type(res)=="table" and res.Success)) then
-        print("✅ BLIND PLACEMENT SUCCESS")
-        return
-    end
-
-    warn("❌ FAILED:", name, "| No ground found in", RADIUS_LIMIT, "studs")
+    warn("❌ FAILED:", name, "| Could not find Ground.")
 end
 
 function TDS:Upgrade(idx)
